@@ -233,10 +233,14 @@ class DetailPanel(QWidget):
 
         # Action buttons
         btn_row = QHBoxLayout()
-        self.open_btn = QPushButton("📂 파일 열기")
-        self.open_btn.setObjectName("primaryBtn")
+        self.viewer_btn = QPushButton("📖 뷰어로 열기")
+        self.viewer_btn.setObjectName("primaryBtn")
+        self.viewer_btn.clicked.connect(self._open_in_viewer)
+        self.viewer_btn.setEnabled(False)
+        self.open_btn = QPushButton("📂 폴더 열기")
         self.open_btn.clicked.connect(self._open_file)
         self.open_btn.setEnabled(False)
+        btn_row.addWidget(self.viewer_btn)
         btn_row.addWidget(self.open_btn)
         layout.addLayout(btn_row)
 
@@ -251,7 +255,9 @@ class DetailPanel(QWidget):
         self.tag_edit.setText(paper.get('tags') or '')
         self.abstract_edit.setPlainText(paper.get('abstract') or '초록 없음')
         self.kw_label.setText(paper.get('keywords') or '—')
-        self.open_btn.setEnabled(bool(paper.get('filepath') and Path(paper['filepath']).exists()))
+        exists = bool(paper.get('filepath') and Path(paper['filepath']).exists())
+        self.open_btn.setEnabled(exists)
+        self.viewer_btn.setEnabled(exists)
         self._filepath = paper.get('filepath', '')
 
     def clear(self):
@@ -263,20 +269,29 @@ class DetailPanel(QWidget):
         self.abstract_edit.clear()
         self.kw_label.setText('—')
         self.open_btn.setEnabled(False)
+        self.viewer_btn.setEnabled(False)
         self._filepath = ''
 
     def _on_tag_edited(self):
         if self._paper_id is not None:
             self.tag_edited.emit(self._paper_id, self.tag_edit.text())
 
+    def _open_in_viewer(self):
+        if hasattr(self, '_filepath') and self._filepath:
+            from ui.pdf_viewer import PDFViewer
+            title = self.lbl_title.text()
+            viewer = PDFViewer(self._filepath, title, parent=self)
+            viewer.exec()
+
     def _open_file(self):
         if hasattr(self, '_filepath') and self._filepath:
             p = Path(self._filepath)
             if p.exists():
+                folder = str(p.parent)
                 if sys.platform == 'win32':
-                    os.startfile(str(p))
+                    os.startfile(folder)
                 else:
-                    subprocess.Popen(['xdg-open', str(p)])
+                    subprocess.Popen(['xdg-open', folder])
 
 
 # ── Main Window ───────────────────────────────────────────────────────────────
@@ -405,6 +420,7 @@ class MainWindow(QMainWindow):
         hh.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
         self.table.setSortingEnabled(True)
         self.table.itemSelectionChanged.connect(self._on_row_selected)
+        self.table.itemDoubleClicked.connect(self._on_row_double_clicked)
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._on_table_context_menu)
 
@@ -626,6 +642,22 @@ class MainWindow(QMainWindow):
         else:
             self._refresh_table()
 
+    def _on_row_double_clicked(self, item):
+        row = self.table.currentRow()
+        if row < 0:
+            return
+        paper_id = self.table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+        paper = db.get_paper(paper_id)
+        if paper and paper.get('filepath') and Path(paper['filepath']).exists():
+            self._open_viewer(paper)
+
+    def _open_viewer(self, paper: dict):
+        from ui.pdf_viewer import PDFViewer
+        viewer = PDFViewer(paper['filepath'],
+                           paper.get('title') or paper.get('filename', ''),
+                           parent=self)
+        viewer.exec()
+
     def _on_row_selected(self):
         rows = self.table.selectedItems()
         if not rows:
@@ -650,13 +682,18 @@ class MainWindow(QMainWindow):
             return
         paper_id = self.table.item(row, 0).data(Qt.ItemDataRole.UserRole)
         menu = QMenu(self)
-        open_action = menu.addAction("📂 파일 열기")
+        view_action   = menu.addAction("📖 뷰어로 열기")
+        open_action   = menu.addAction("📂 폴더 열기")
         refetch_action = menu.addAction("🔄 메타데이터 다시 가져오기")
         menu.addSeparator()
         delete_action = menu.addAction("🗑️ 삭제")
 
         action = menu.exec(self.table.viewport().mapToGlobal(pos))
-        if action == delete_action:
+        if action == view_action:
+            paper = db.get_paper(paper_id)
+            if paper and Path(paper.get('filepath','')).exists():
+                self._open_viewer(paper)
+        elif action == delete_action:
             reply = QMessageBox.question(
                 self, "삭제 확인", "이 문헌을 라이브러리에서 삭제할까요?\n(파일은 삭제되지 않습니다)",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
@@ -671,10 +708,11 @@ class MainWindow(QMainWindow):
             if paper:
                 p = Path(paper['filepath'])
                 if p.exists():
+                    folder = str(p.parent)
                     if sys.platform == 'win32':
-                        os.startfile(str(p))
+                        os.startfile(folder)
                     else:
-                        subprocess.Popen(['xdg-open', str(p)])
+                        subprocess.Popen(['xdg-open', folder])
         elif action == refetch_action:
             paper = db.get_paper(paper_id)
             if paper:
